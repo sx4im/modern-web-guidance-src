@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import child_process from 'node:child_process';
-import { retrieveUseCase, OriginTrialGateError, VolatileFeatureGateError, FeatureGateError } from './retrieve.ts';
+import { retrieveUseCase, OriginTrialGateError, VolatileFeatureGateError, FeatureGateError, splitGuideSections, normalizeHeadingText } from './retrieve.ts';
 import { searchUseCases } from './search.ts';
 import { USE_CASES } from './guides.ts';
 
@@ -22,9 +22,13 @@ function runCli(args: string[], options: { cwd: string }): child_process.SpawnSy
   });
 }
 
-const otGuide = USE_CASES.find((u) => (u.originTrials?.length ?? 0) > 0)!;
-const volatileGuide = USE_CASES.find((u) => (u.volatileFeatures?.length ?? 0) > 0)!;
+const otGuide = USE_CASES.find((u) => (u.originTrials?.length ?? 0) > 0 && !(u.volatileSections?.length ?? 0))!;
+const volatileGuide = USE_CASES.find((u) => (u.volatileFeatures?.length ?? 0) > 0 && !(u.volatileSections?.length ?? 0))!;
 const regularGuide = USE_CASES.find((u) => !u.originTrials?.length && !u.volatileFeatures?.length && u.tokenCount < 1500)!;
+// A guide that is only partly gated: most sections cover stable features, and
+// the guide declares the volatile sections in `volatile-sections` so retrieve
+// can serve the stable subset without opting in.
+const partialGuide = USE_CASES.find((u) => u.id === 'custom-text-decorations')!;
 
 describe('retrieveUseCase and Origin Trial gate', () => {
   let tempDir: string;
@@ -233,5 +237,145 @@ describe('retrieveUseCase and Volatile Feature gate', () => {
 
     const results = await searchUseCases(volatileGuide.description);
     assert.ok(results.map((r) => r.id).includes(volatileGuide.id));
+  });
+});
+
+describe('retrieveUseCase serves the stable subset of a partly gated guide', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'retrieve-partial-test-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  test('serves the stable sections of custom-text-decorations without opting in', async () => {
+    assert.ok((partialGuide.volatileFeatures?.length ?? 0) > 0);
+    assert.deepStrictEqual(partialGuide.volatileSections, ['Skip spaces']);
+
+    const guide = await retrieveUseCase(partialGuide.id, { cwd: tempDir });
+
+    // Stable content is served: the core recommendation and the stable
+    // ink-skipping sections.
+    assert.ok(guide.includes('## Style the line'));
+    assert.ok(guide.includes('text-underline-offset'));
+    assert.ok(guide.includes('### Ink skipping'));
+    // The withheld sections are gone: neither Skip spaces heading nor the
+    // gated declaration survives.
+    assert.ok(!guide.includes('#### Skip spaces'));
+    assert.ok(!guide.includes('### Skip spaces'));
+    assert.ok(!guide.includes('text-decoration-skip-spaces: all'));
+    assert.ok(!guide.includes('Do not declare `text-decoration-skip-spaces`'));
+    // The notice says what was withheld and how to opt in.
+    assert.ok(guide.includes('> [!CAUTION]'));
+    assert.ok(guide.includes('Partial guide'));
+    assert.ok(guide.includes('"Skip spaces"'));
+    assert.ok(guide.includes('text-decoration-skip-spaces'));
+    assert.ok(guide.includes('npx modern-web-guidance@latest set-allow-volatile-features'));
+  });
+
+  test('serves the full guide when opted into volatile features', async () => {
+    fs.writeFileSync(path.join(tempDir, '.mwgrc'), JSON.stringify({ allowVolatileFeatures: true }));
+    const guide = await retrieveUseCase(partialGuide.id, { cwd: tempDir });
+    assert.ok(guide.includes('#### Skip spaces'));
+    assert.ok(guide.includes('text-decoration-skip-spaces: all'));
+    assert.ok(!guide.includes('Partial guide'));
+  });
+
+  test('still rejects the partly gated guide on an explicit opt-out', async () => {
+    fs.writeFileSync(path.join(tempDir, '.mwgrc'), JSON.stringify({ allowVolatileFeatures: false }));
+    await assert.rejects(
+      () => retrieveUseCase(partialGuide.id, { cwd: tempDir }),
+      (err: unknown) => {
+        assert.ok(err instanceof FeatureGateError);
+        assert.ok(err instanceof VolatileFeatureGateError);
+        assert.ok(err.message.includes('"allowVolatileFeatures": false'));
+        return true;
+      }
+    );
+  });
+
+  test('still rejects a fully gated guide with no declared stable subset', async () => {
+    assert.ok(!(volatileGuide.volatileSections?.length ?? 0));
+    await assert.rejects(
+      () => retrieveUseCase(volatileGuide.id, { cwd: tempDir }),
+      (err: unknown) => {
+        assert.ok(err instanceof FeatureGateError);
+        assert.ok(err instanceof VolatileFeatureGateError);
+        return true;
+      }
+    );
+  });
+
+  test('CLI retrieve exits 0 for the partly gated guide and 1 for a fully gated one', () => {
+    const partialRes = runCli(['retrieve', partialGuide.id], { cwd: tempDir });
+    assert.strictEqual(partialRes.status, 0);
+    // The partial guide exceeds the inline stdout limit, so the CLI saves it
+    // to a file and prints the path instead of inlining it.
+    const savedMatch = partialRes.stdout.match(/saved to (\S+) to prevent/);
+    assert.ok(savedMatch, `expected a saved-file notice, got: ${partialRes.stdout.slice(0, 200)}`);
+    const savedContent = fs.readFileSync(savedMatch[1], 'utf8');
+    fs.rmSync(savedMatch[1], { force: true });
+    assert.ok(savedContent.includes(`--- Guide for ${partialGuide.id} ---`));
+    assert.ok(savedContent.includes('Partial guide'));
+    assert.ok(savedContent.includes('## Style the line'));
+    assert.ok(!savedContent.includes('#### Skip spaces'));
+
+    const gatedRes = runCli(['retrieve', volatileGuide.id], { cwd: tempDir });
+    assert.strictEqual(gatedRes.status, 1);
+    assert.ok(gatedRes.stderr.includes('> [!CAUTION]'));
+  });
+});
+
+describe('splitGuideSections', () => {
+  test('groups consecutive headings and reproduces the input exactly', () => {
+    const markdown = [
+      '# Title',
+      '',
+      'Intro text.',
+      '',
+      '## First',
+      '',
+      'Body one.',
+      '',
+      '## Second',
+      '### Nested',
+      '',
+      'Body two.',
+      '',
+    ].join('\n');
+    const sections = splitGuideSections(markdown);
+    assert.strictEqual(sections.length, 3);
+    assert.deepStrictEqual(sections[0].headings, ['title']);
+    assert.deepStrictEqual(sections[1].headings, ['first']);
+    assert.deepStrictEqual(sections[2].headings, ['second', 'nested']);
+    assert.strictEqual(sections.map((s) => s.text).join('\n'), markdown);
+  });
+
+  test('does not split on heading-like lines inside fenced code blocks', () => {
+    const markdown = [
+      '# Title',
+      '',
+      '```css',
+      '# not a heading',
+      '```',
+      '',
+      '## Real',
+      '',
+      'Body.',
+      '',
+    ].join('\n');
+    const sections = splitGuideSections(markdown);
+    assert.strictEqual(sections.length, 2);
+    assert.deepStrictEqual(sections[0].headings, ['title']);
+    assert.deepStrictEqual(sections[1].headings, ['real']);
+    assert.strictEqual(sections.map((s) => s.text).join('\n'), markdown);
+  });
+
+  test('normalizeHeadingText strips inline markup and lowercases', () => {
+    assert.strictEqual(normalizeHeadingText('Ink skipping `all`'), 'ink skipping all');
+    assert.strictEqual(normalizeHeadingText('  Skip Spaces  '), 'skip spaces');
   });
 });

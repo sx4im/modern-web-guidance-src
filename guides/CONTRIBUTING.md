@@ -24,6 +24,7 @@ Whether a feature may appear in default guidance depends on how far it has shipp
 | Shipped in two or more engines, or graduated from `volatile` | Included in default guidance. |
 
 * **Graduation**: A `volatile` feature moves to default guidance automatically at the end of the 3-month window unless an objection is upheld. A feature kept `volatile` beyond the window graduates once the concern is resolved (e.g., a second engine ships it and the design settles, or the Content ATL scopes guidance to a stable subset).
+* **Partly gated guides**: When a guide is mostly stable but one section covers a `volatile` feature or Origin Trial, the whole guide is gated by default — even for readers who only need the stable part. To keep the stable part retrievable, list the gated sections in frontmatter (`volatile-sections`, one heading text per line). `retrieve` then withholds exactly those sections until the project opts in and serves the rest. Each entry must match a heading in the guide; validation fails otherwise.
 * **Objections and petitions**: Any Peer, Content ATL, or Owner may object to a feature graduating, petition to shorten or extend its window, or re-label a feature that changes more than expected. See [Volatility Objections](#volatility-objections).
 
 ### Volatility Objections

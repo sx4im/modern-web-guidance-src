@@ -8,10 +8,12 @@ import {
   generateGuidesTocYaml,
   processSkillsCliGuide,
   processDevsiteGuide,
+  parseVolatileSections,
   type DevsiteGuideMetadata,
   type StoreUseCase,
 } from './build-guides.ts';
 import { chunkMarkdown, formatChunkHeader } from '../core/guide-chunks.ts';
+import type { UseCase } from '../rag/guides.ts';
 import {
   getOriginTrialsRegistry,
   getVolatileFeaturesRegistry,
@@ -282,6 +284,40 @@ describe('processDevsiteGuide', () => {
       const bodyIdx = output.indexOf('Body content.');
       assert.ok(promoIdx !== -1 && otIdx > promoIdx && volatileIdx > otIdx && volatileIdx < bodyIdx);
       assert.strictEqual(output.match(/<aside class="caution">/g)?.length, 2);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('parseVolatileSections and skills-cli pass-through', () => {
+  it('returns [] without the field, trims entries, and throws on bad values', () => {
+    assert.deepStrictEqual(parseVolatileSections({}, 'guide.md'), []);
+    assert.deepStrictEqual(parseVolatileSections({ 'volatile-sections': ['  Skip spaces '] }, 'guide.md'), ['Skip spaces']);
+    assert.throws(() => parseVolatileSections({ 'volatile-sections': 'Skip spaces' }, 'guide.md'), /must be an array of heading texts/);
+    assert.throws(() => parseVolatileSections({ 'volatile-sections': [''] }, 'guide.md'), /must be an array of heading texts/);
+  });
+
+  it('records volatileSections in the skills-cli use case entry', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'volatile-sections-build-test-'));
+    try {
+      const guideFile = path.join(tmpDir, 'test-guide.md');
+      fs.writeFileSync(
+        guideFile,
+        `---\ntitle: Volatile Sections Test Guide\ndescription: Test guide description\nweb-feature-ids:\n  - text-decoration-skip-spaces\nvolatile-sections:\n  - Skip spaces\n---\n# Volatile Sections Test Guide\n\n## Style the line\n\nStable body.\n\n## Skip spaces\n\nGated body.\n`
+      );
+      const useCases: UseCase[] = [];
+      await processSkillsCliGuide({
+        filePath: guideFile,
+        category: 'css',
+        id: 'test-guide',
+        useCases,
+        storeUseCases: [],
+        chunkCache: new Map<string, Float32Array>(),
+      });
+      assert.strictEqual(useCases.length, 1);
+      assert.deepStrictEqual(useCases[0].volatileSections, ['Skip spaces']);
+      assert.ok(Array.isArray(useCases[0].volatileFeatures));
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

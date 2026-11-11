@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { parseExpectations, validateHtmlTags, validateHeadings, validateGuideTitle, validateBaselineClaims, validateGuide, inventoryGuide, classifyGuide, getSupportedBaseApps, extractH1Heading, extractAllH1Headings, stripAllComments, checkOriginTrialGraduations, detectEvals, parseGuideMetadata, getPendingGuideStage, ProjectStatus, type GuideInventory, validateCallouts, validatePendingGuideRefs, validateCategory, validateHeadingHtmlTags, validateSecureSrc, validateCodeFences, validateAnchorLinks } from './guide-validation.ts';
+import { parseExpectations, validateHtmlTags, validateHeadings, validateGuideTitle, validateBaselineClaims, validateGuide, inventoryGuide, classifyGuide, getSupportedBaseApps, extractH1Heading, extractAllH1Headings, stripAllComments, checkOriginTrialGraduations, detectEvals, parseGuideMetadata, getPendingGuideStage, ProjectStatus, type GuideInventory, validateCallouts, validatePendingGuideRefs, validateCategory, validateHeadingHtmlTags, validateSecureSrc, validateCodeFences, validateAnchorLinks, validateVolatileSections } from './guide-validation.ts';
 import { extractFeatureIds } from './feature-parser.ts';
 import { maskComments, validateMacros } from './macros.ts';
 import { guidesDir } from './paths.ts';
@@ -1222,3 +1222,70 @@ describe('validateAnchorLinks', () => {
 
 
 
+
+describe('validateVolatileSections', () => {
+  const body = [
+    '# Test Guide',
+    '',
+    'Intro.',
+    '',
+    '## Style the line',
+    '',
+    'Stable body.',
+    '',
+    '## Control where the line is skipped',
+    '',
+    '### Ink skipping',
+    '',
+    'Stable body.',
+    '',
+    '#### Skip spaces',
+    '',
+    'Gated body.',
+    '',
+    '```css',
+    '# Not a heading',
+    '```',
+    '',
+  ].join('\n');
+
+  test('accepts entries that match existing headings at any depth', () => {
+    const errors = validateVolatileSections(body, 'guide.md', { 'volatile-sections': ['Skip spaces'] });
+    assert.deepStrictEqual(errors, []);
+  });
+
+  test('accepts a guide without the field', () => {
+    assert.deepStrictEqual(validateVolatileSections(body, 'guide.md', {}), []);
+  });
+
+  test('rejects entries that match no heading', () => {
+    const errors = validateVolatileSections(body, 'guide.md', { 'volatile-sections': ['No such section'] });
+    assert.strictEqual(errors.length, 1);
+    assert.match(errors[0], /"volatile-sections" entry "No such section" matches no heading/);
+  });
+
+  test('rejects a non-array value and blank entries', () => {
+    assert.strictEqual(validateVolatileSections(body, 'guide.md', { 'volatile-sections': 'Skip spaces' as unknown as string[] }).length, 1);
+    assert.strictEqual(validateVolatileSections(body, 'guide.md', { 'volatile-sections': ['  '] }).length, 1);
+  });
+
+  test('ignores headings inside fenced code blocks', () => {
+    const errors = validateVolatileSections(body, 'guide.md', { 'volatile-sections': ['Not a heading'] });
+    assert.strictEqual(errors.length, 1);
+    assert.match(errors[0], /matches no heading/);
+  });
+
+  test('matches headings with inline markup', () => {
+    const marked = validateVolatileSections('## Ink skipping `all`\n\nBody.\n', 'guide.md', { 'volatile-sections': ['Ink skipping all'] });
+    assert.deepStrictEqual(marked, []);
+  });
+
+  test('the real custom-text-decorations guide validates its declaration', () => {
+    const guidePath = path.join(guidesDir, 'visual-design/custom-text-decorations/guide.md');
+    const result = validateGuide(guidePath);
+    assert.ok(
+      !result.errors.some((e) => e.includes('volatile-sections')),
+      `unexpected volatile-sections errors: ${result.errors.filter((e) => e.includes('volatile-sections')).join('; ')}`,
+    );
+  });
+});

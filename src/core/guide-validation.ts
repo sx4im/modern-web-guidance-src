@@ -142,6 +142,12 @@ interface GuideData {
   name?: string;
   description?: string;
   'web-feature-ids'?: string[];
+  /**
+   * Heading texts of the sections that cover a gated (volatile / origin-trial)
+   * feature. `retrieve` withholds exactly these sections until the project
+   * opts in. Each entry must match a heading in the guide body.
+   */
+  'volatile-sections'?: string[];
   /** Omit to publish. See DraftState. */
   draft?: unknown;
   'draft-reason'?: string;
@@ -353,6 +359,7 @@ export function validateGuide(filePath: string): ValidationResult {
   errors.push(...validatePendingGuideRefs(body, relativePath));
   errors.push(...validateGuideTitle(maskedBody, relativePath, data, { requireTitle: true }));
   errors.push(...validateBaselineClaims(maskedBody, relativePath, data));
+  errors.push(...validateVolatileSections(maskedBody, relativePath, data));
 
   return { errors, data, body, filePath };
 }
@@ -1008,6 +1015,57 @@ export function validateHeadings(body: string, relativePath: string, data?: Guid
 }
 
 const PENDING_GUIDE_REF_PATTERN = /\{#\s*PENDING_GUIDE_REF:([\s\S]*?)#\}/g;
+
+/**
+ * Normalizes a heading text for comparison with a `volatile-sections` entry:
+ * strips inline code / emphasis / link markup, collapses whitespace, lowercases.
+ * Mirrors `normalizeHeadingText` in `src/rag/retrieve.ts`; keep the two in sync.
+ */
+export function normalizeHeadingText(text: string): string {
+  return text
+    .replace(/`([^`]*)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Validates the optional `volatile-sections` frontmatter list: each entry must
+ * be a non-empty string naming a heading that exists in the guide body, so a
+ * renamed or removed section fails validation instead of silently leaving
+ * `retrieve` with nothing to withhold.
+ */
+export function validateVolatileSections(body: string, relativePath: string, data?: GuideData): string[] {
+  const errors: string[] = [];
+  const declared = data?.['volatile-sections'];
+  if (declared === undefined) {
+    return errors;
+  }
+  if (!Array.isArray(declared) || declared.some((s) => typeof s !== 'string' || s.trim().length === 0)) {
+    errors.push(`"volatile-sections" must be an array of heading texts in ${relativePath}.`);
+    return errors;
+  }
+  const headings = new Set<string>();
+  try {
+    for (const token of marked.lexer(body)) {
+      if (token.type === 'heading') {
+        headings.add(normalizeHeadingText(token.text));
+      }
+    }
+  } catch {
+    // Lexer failures are reported by the other validators; skip this check.
+    return errors;
+  }
+  for (const section of declared as string[]) {
+    if (!headings.has(normalizeHeadingText(section))) {
+      errors.push(`"volatile-sections" entry "${section}" matches no heading in ${relativePath}. Update it to name a section that exists.`);
+    }
+  }
+  return errors;
+}
 const GUIDE_REF_SLUG_PATTERN = /GUIDE_REF\(\s*["']([^"']+)["']\s*\)/g;
 
 /**

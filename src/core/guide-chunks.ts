@@ -147,6 +147,7 @@ export interface ExtractedGuideData {
   featureIds: string[];
   featuresUsed: string[];
   processedMarkdown: string;
+  frontmatter: Record<string, unknown>;
   embeddedChunks: Array<{
     chunk: string;
     embeddedText: string;
@@ -187,7 +188,7 @@ export function extractGuideChunks(
     return null;
   }
 
-  const { title, description, featureIds, featuresUsed, processedMarkdown } = parsed;
+  const { title, description, featureIds, featuresUsed, processedMarkdown, frontmatter } = parsed;
 
   const header = formatChunkHeader(title, id, category, featureIds);
   const summaryChunk = `# ${title}\n\n${description}`;
@@ -208,6 +209,7 @@ export function extractGuideChunks(
     featureIds,
     featuresUsed,
     processedMarkdown,
+    frontmatter,
     embeddedChunks,
   };
 }

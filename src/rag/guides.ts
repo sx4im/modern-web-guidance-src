@@ -13,6 +13,14 @@ export interface UseCase {
   tokenCount: number;
   originTrials?: OriginTrialMetadata[];
   volatileFeatures?: VolatileFeatureMetadata[];
+  /**
+   * Heading texts of the sections that cover a gated (volatile / origin-trial)
+   * feature, as declared in the guide's frontmatter (`volatile-sections`).
+   * `retrieve` withholds exactly these sections when the project has not
+   * opted in, and serves the remaining stable sections instead of rejecting
+   * the whole guide. Absent when the guide has no such declaration.
+   */
+  volatileSections?: string[];
 }
 
 function loadUseCases(): UseCase[] {

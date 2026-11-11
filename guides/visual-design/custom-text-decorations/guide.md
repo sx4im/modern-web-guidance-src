@@ -10,6 +10,12 @@ web-feature-ids:
   - background-clip-border-area
   - border-shape
   - corner-shape
+# Sections that cover a volatile feature (text-decoration-skip-spaces).
+# `retrieve` withholds exactly these sections until the project opts into
+# volatile features, and serves the remaining stable sections instead of
+# rejecting the whole guide. Each entry must match a heading in this guide.
+volatile-sections:
+  - Skip spaces
 ---
 
 # Custom text decorations

@@ -642,6 +642,26 @@ export async function processDevsiteGuide(
   }
 }
 
+/**
+ * Reads the optional `volatile-sections` frontmatter list: heading texts of the
+ * sections that cover a gated (volatile / origin-trial) feature. `retrieve`
+ * withholds exactly those sections until the project opts in, and serves the
+ * remaining stable sections. Throws on a malformed value so a bad declaration
+ * fails the build instead of silently changing what `retrieve` serves.
+ * Whether each entry matches a heading in the guide is checked by
+ * `validateVolatileSections` in `src/core/guide-validation.ts`.
+ */
+export function parseVolatileSections(frontmatter: Record<string, unknown>, filePath: string): string[] {
+  const declared = frontmatter['volatile-sections'];
+  if (declared === undefined) {
+    return [];
+  }
+  if (!Array.isArray(declared) || declared.some((s) => typeof s !== 'string' || s.trim().length === 0)) {
+    throw new Error(`"volatile-sections" must be an array of heading texts in ${filePath}.`);
+  }
+  return declared.map((s) => (s as string).trim());
+}
+
 export interface ProcessSkillsCliGuideOptions {
   filePath: string;
   category: string;
@@ -687,9 +707,10 @@ export async function processSkillsCliGuide(
   if (modelName && !embedder) {
     throw new Error(`Embedder is required when modelName "${modelName}" is provided for skills-cli target`);
   }
-  const { description, featureIds, featuresUsed, processedMarkdown } = extracted;
+  const { description, featureIds, featuresUsed, processedMarkdown, frontmatter } = extracted;
   const originTrials = getGuideOriginTrials(featureIds);
   const volatileFeatures = getGuideVolatileFeatures(featureIds);
+  const volatileSections = parseVolatileSections(frontmatter, filePath);
   const tokenCount = embedder?.countTokens
     ? await embedder.countTokens(processedMarkdown)
     : approxTokens(processedMarkdown);
@@ -702,6 +723,7 @@ export async function processSkillsCliGuide(
     tokenCount,
     ...(originTrials.length > 0 ? { originTrials } : {}),
     ...(volatileFeatures.length > 0 ? { volatileFeatures } : {}),
+    ...(volatileSections.length > 0 ? { volatileSections } : {}),
   });
 
   for (const ec of extracted.embeddedChunks) {
