@@ -739,4 +739,97 @@ describe('runAnalyzeCli', () => {
       assert.deepEqual(parsedClean.guides, []);
     });
   });
+
+  describe('retrieve gate annotation', () => {
+    const PROBE_CSS = `.probe a {\n  text-decoration: none;\n  padding-bottom: 2px;\n  border-bottom: 1px solid red;\n}\n`;
+
+    async function writeGuideDataDir(dir: string): Promise<void> {
+      await mkdir(join(dir, 'gen'), { recursive: true });
+      await writeFile(
+        join(dir, 'gen', 'guides.json'),
+        JSON.stringify([
+          {
+            id: 'custom-text-decorations',
+            description: 'Add text decorations.',
+            category: 'visual-design',
+            featuresUsed: ['text-decoration'],
+            tokenCount: 4000,
+            volatileFeatures: [{ id: 'text-decoration-skip-spaces', reason: 'recent-single-engine' }],
+          },
+          {
+            id: 'autofill-sign-in-form',
+            description: 'Autofill for sign-in forms.',
+            category: 'forms',
+            featuresUsed: ['autofill'],
+            tokenCount: 1200,
+          },
+        ]),
+        'utf8',
+      );
+    }
+
+    it('annotates gated guides in --json output and leaves ungated guides unannotated', async () => {
+      await withTempDir(async (testDir) => {
+        await withTempDir(async (dataDir) => {
+          await writeFile(join(testDir, 'probe.css'), PROBE_CSS, 'utf8');
+          await writeFile(
+            join(testDir, 'login.html'),
+            `<form action="/login" method="POST">\n  <input type="password" name="password">\n</form>`,
+            'utf8',
+          );
+          await writeGuideDataDir(dataDir);
+
+          const res = await runAnalyzeCli([testDir, '--json'], { guideDataDir: dataDir });
+          assert.equal(res.exitCode, 0);
+          const parsed = JSON.parse(res.output) as AnalyzeJsonOutput;
+
+          const gated = parsed.guides.find((g) => g.guideId === 'custom-text-decorations');
+          assert.ok(gated, 'Expected custom-text-decorations guide in JSON output');
+          assert.deepEqual(gated.retrieveGate, {
+            gate: 'volatile-features',
+            features: ['text-decoration-skip-spaces'],
+            optInKey: 'allowVolatileFeatures',
+            unlockCommand: 'npx modern-web-guidance@latest set-allow-volatile-features',
+            headingLabel: 'volatile features',
+          });
+          // The rule summary stays the usable stable alternative: it names only stable properties.
+          assert.match(gated.rules[0]?.summary ?? '', /text-decoration-thickness/);
+
+          const ungated = parsed.guides.find((g) => g.guideId === 'autofill-sign-in-form');
+          assert.ok(ungated, 'Expected autofill-sign-in-form guide in JSON output');
+          assert.equal(ungated.retrieveGate, undefined);
+        });
+      });
+    });
+
+    it('notes the retrieve gate in human-readable output', async () => {
+      await withTempDir(async (testDir) => {
+        await withTempDir(async (dataDir) => {
+          await writeFile(join(testDir, 'probe.css'), PROBE_CSS, 'utf8');
+          await writeGuideDataDir(dataDir);
+
+          const res = await runAnalyzeCli([testDir], { guideDataDir: dataDir });
+          assert.equal(res.exitCode, 0);
+          assert.match(res.output, /custom-text-decorations/);
+          assert.match(res.output, /is gated/);
+          assert.match(res.output, /text-decoration-skip-spaces/);
+          assert.match(res.output, /npx modern-web-guidance@latest set-allow-volatile-features/);
+        });
+      });
+    });
+
+    it('omits retrieveGate when no guide data is available', async () => {
+      await withTempDir(async (testDir) => {
+        await writeFile(join(testDir, 'probe.css'), PROBE_CSS, 'utf8');
+        const res = await runAnalyzeCli([testDir, '--json'], {
+          guideDataDir: join(testDir, 'missing-data'),
+        });
+        assert.equal(res.exitCode, 0);
+        const parsed = JSON.parse(res.output) as AnalyzeJsonOutput;
+        const gated = parsed.guides.find((g) => g.guideId === 'custom-text-decorations');
+        assert.ok(gated, 'Expected custom-text-decorations guide in JSON output');
+        assert.equal(gated.retrieveGate, undefined);
+      });
+    });
+  });
 });

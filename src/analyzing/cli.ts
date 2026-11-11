@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs, styleText } from 'node:util';
 import { QUALIFIED_RULES } from './rules/index.ts';
 import { MAX_SOURCE_FILE_BYTES, scanFiles, scanRepoFiles } from './scanners/index.ts';
+import { getGuideGateInfo, type GuideGateInfo } from '../rag/guide-gates.ts';
 import type {
   AnalyzerFinding,
   AnalyzerRule,
@@ -28,6 +29,8 @@ export interface AnalyzeCliRuleGroup {
 export interface AnalyzeCliGuideGroup {
   readonly guideId: string;
   readonly retrieveCommand: string;
+  /** Present when `retrieve <guideId>` needs an opt-in first; absent when retrievable. */
+  readonly retrieveGate?: GuideGateInfo;
   readonly count: number;
   readonly rules: readonly AnalyzeCliRuleGroup[];
 }
@@ -47,6 +50,8 @@ export interface AnalyzeCliExecutionOptions {
   readonly rules?: readonly AnalyzerRule[];
   readonly cwd?: string;
   readonly maxFiles?: number;
+  /** Skills-cli data dir holding gen/guides.json; resolved by default. Test seam. */
+  readonly guideDataDir?: string;
 }
 
 export interface AnalyzeCliResult {
@@ -221,6 +226,14 @@ export function formatHumanReadable(
         appendFindingGroupBlock(lines, rg, '    ', fmt);
       }
     }
+    if (g.retrieveGate) {
+      lines.push(
+        `  ${fmt(
+          'dim',
+          `Note: 'retrieve ${g.guideId}' is gated (${g.retrieveGate.headingLabel}: ${g.retrieveGate.features.join(', ')}). Unlock with '${g.retrieveGate.unlockCommand}'.`,
+        )}`,
+      );
+    }
     lines.push('');
   }
 
@@ -244,6 +257,7 @@ function errorCliResult(error: string, isJson: boolean, targetDir = '.'): Analyz
 function groupFindingsByGuide(
   findings: readonly AnalyzerFinding[],
   activeRules: readonly AnalyzerRule[],
+  guideDataDir?: string,
 ): AnalyzeCliGuideGroup[] {
   const ruleMap = new Map(activeRules.map((r) => [r.id, r]));
   const findingsByGuide = Map.groupBy(findings, (f) => f.guideId);
@@ -278,9 +292,11 @@ function groupFindingsByGuide(
           };
         });
 
+      const retrieveGate = getGuideGateInfo(gid, guideDataDir);
       return {
         guideId: gid,
         retrieveCommand: `npx modern-web-guidance retrieve ${gid}`,
+        ...(retrieveGate ? { retrieveGate } : {}),
         count: guideFindings.length,
         rules,
       };
@@ -377,7 +393,7 @@ export async function runAnalyzeCli(
   }
   const skippedDocsAndTestsCount = scanStats.skippedDocsAndTestsCount ?? 0;
 
-  const guides = groupFindingsByGuide(findings, activeRules);
+  const guides = groupFindingsByGuide(findings, activeRules, options?.guideDataDir);
   const totalFindings = findings.length;
   const data: AnalyzeJsonOutput = {
     targetDir,
