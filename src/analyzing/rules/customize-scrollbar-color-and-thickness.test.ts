@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { scanCss } from '../scanners/css-scanner.ts';
+import { scanFiles } from '../scanners/index.ts';
 import type { CssRuleMatcher } from '../schema.ts';
 import { customizeScrollbarColorAndThicknessRule } from './customize-scrollbar-color-and-thickness.ts';
 
@@ -395,5 +396,60 @@ void test('customize-scrollbar-color-and-thickness: negative / exempt cases', as
       }
     `;
     assert.equal(scanCss('hidden-button.css', hiddenButtonCss, [matcher]).length, 2);
+  });
+});
+
+void test('customize-scrollbar-color-and-thickness: scss coverage (issue #3553)', async (t) => {
+  await t.test('legacy-scan finds the rule in .scss files and after // comments in scss SFC blocks', () => {
+    const rule = '.box::-webkit-scrollbar-thumb { background: red; }';
+    const files = new Map<string, string>([
+      ['case1.css', rule],
+      ['case2.scss', rule],
+      [
+        'case3_vue_clean.vue',
+        '<template><div/></template><style lang="scss">\n.box::-webkit-scrollbar-thumb { background: red; }\n</style>',
+      ],
+      [
+        'case4_vue_block_comment.vue',
+        '<template><div/></template><style lang="scss">\n/* comment */\n.box::-webkit-scrollbar-thumb { background: red; }\n</style>',
+      ],
+      [
+        'case5_vue_line_comment.vue',
+        '<template><div/></template><style lang="scss">\n// comment\n.box::-webkit-scrollbar-thumb { background: red; }\n</style>',
+      ],
+      ['case6_css_nested.css', '.box { &::-webkit-scrollbar-thumb { background: red; } }'],
+    ]);
+    const findings = scanFiles(files, [customizeScrollbarColorAndThicknessRule], {
+      repo: 'test',
+      commit: 'test',
+    });
+    assert.equal(findings.length, 6);
+    assert.deepEqual(
+      findings.map((f) => f.file),
+      [
+        'case1.css',
+        'case2.scss',
+        'case3_vue_clean.vue',
+        'case4_vue_block_comment.vue',
+        'case5_vue_line_comment.vue',
+        'case6_css_nested.css',
+      ],
+    );
+    // Offsets are preserved: the rule in the line-commented SFC is on line 3.
+    assert.equal(
+      findings.find((f) => f.file === 'case5_vue_line_comment.vue')?.line,
+      3,
+    );
+  });
+
+  await t.test('standalone .scss files with // header comments still scan', () => {
+    const scss = '// header comment\n.box::-webkit-scrollbar-thumb { background: red; }';
+    const findings = scanFiles(
+      new Map([['assets/styles/index.scss', scss]]),
+      [customizeScrollbarColorAndThicknessRule],
+      { repo: 'test', commit: 'test' },
+    );
+    assert.equal(findings.length, 1);
+    assert.equal(findings[0]?.line, 2);
   });
 });

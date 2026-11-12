@@ -263,6 +263,79 @@ export function isMarkupPath(relPath: string): boolean {
   );
 }
 
+const PREPROCESSOR_STYLE_LANGS: ReadonlySet<string> = new Set(['scss', 'sass', 'less']);
+
+/**
+ * Blanks `//` line comments in SCSS/Sass/Less content, replacing the comment
+ * text with spaces (preserving line/column offsets) so a plain-CSS parser can
+ * read the rules that follow them. `//` inside quoted strings, `/* ... *\/`
+ * block comments, `://` URLs, and protocol-relative `//` after `(` are left
+ * alone, so declarations such as `url(https://…)` survive intact.
+ */
+export function blankPreprocessorLineComments(content: string): string {
+  const chars = content.split('');
+  const len = chars.length;
+  let i = 0;
+  let quote: string | null = null;
+  let inBlockComment = false;
+
+  while (i < len) {
+    const ch = chars[i]!;
+
+    if (inBlockComment) {
+      if (ch === '*' && chars[i + 1] === '/') {
+        inBlockComment = false;
+        i += 2;
+      } else {
+        i++;
+      }
+      continue;
+    }
+
+    if (quote !== null) {
+      if (ch === '\\') {
+        i += 2;
+        continue;
+      }
+      if (ch === quote) {
+        quote = null;
+      }
+      i++;
+      continue;
+    }
+
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      i++;
+      continue;
+    }
+
+    if (ch === '/' && chars[i + 1] === '*') {
+      inBlockComment = true;
+      i += 2;
+      continue;
+    }
+
+    if (ch === '/' && chars[i + 1] === '/') {
+      const prev = i > 0 ? chars[i - 1] : '';
+      if (prev !== ':' && prev !== '(') {
+        // Blank to end of line, preserving newlines (and therefore offsets).
+        let j = i;
+        while (j < len && chars[j] !== '\n' && chars[j] !== '\r') {
+          chars[j] = ' ';
+          j++;
+        }
+        i = j;
+        continue;
+      }
+    }
+
+    i++;
+  }
+
+  return chars.join('');
+}
+
 /**
  * Extracts style blocks from HTML, Vue, Svelte, and Astro files,
  * or Lit css`...` tagged template literals from JS/TS files.
@@ -274,12 +347,22 @@ export function extractStyleBlocks(relPath: string, content: string): readonly s
 
   const blocks: string[] = [];
   for (const match of content.matchAll(STYLE_TAG_REGEX)) {
+    const attrStr = match[1] ?? '';
     const body = match[2] ?? '';
     if (body.trim().length > 0 && match.index !== undefined) {
       const openTagLen = match[0].indexOf('>') + 1;
       const startOffset = match.index + openTagLen;
       const endOffset = startOffset + body.length;
-      blocks.push(blankOutsideRange(content, startOffset, endOffset));
+      const blanked = blankOutsideRange(content, startOffset, endOffset);
+      // cssomnom parses standard CSS, so a `//` line comment in a
+      // preprocessor block would swallow the rule that follows it. Blank
+      // those comments (offsets preserved) for scss/sass/less blocks only.
+      const lang = parseTagAttributes(attrStr).lang?.toLowerCase();
+      blocks.push(
+        lang !== undefined && PREPROCESSOR_STYLE_LANGS.has(lang)
+          ? blankPreprocessorLineComments(blanked)
+          : blanked,
+      );
     }
   }
 

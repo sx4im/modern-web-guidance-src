@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   blankOutsideRange,
+  blankPreprocessorLineComments,
   blankRanges,
   extractScriptBlocks,
   extractStyleBlocks,
@@ -40,6 +41,57 @@ void test('sfc-extractor: Astro frontmatter extraction', async (t) => {
     assert.ok(block);
     assert.equal(block.virtualPath, 'src/pages/test.astro.ts');
     assert.equal(block.blankedContent.includes('const x = 42;'), true);
+  });
+});
+
+void test('sfc-extractor: preprocessor // line comments in style blocks', async (t) => {
+  await t.test('blankPreprocessorLineComments blanks // comments but preserves offsets', () => {
+    const scss = '// header comment\n.box { color: red; }\n// trailing';
+    const blanked = blankPreprocessorLineComments(scss);
+    assert.equal(blanked.length, scss.length);
+    assert.equal(blanked.split('\n').length, scss.split('\n').length);
+    assert.equal(blanked.includes('//'), false);
+    assert.equal(blanked.includes('.box { color: red; }'), true);
+  });
+
+  await t.test('blankPreprocessorLineComments leaves URLs, strings, and block comments alone', () => {
+    const scss = [
+      '.a { background: url(https://example.com/a.png); }',
+      '.b { background: url(//cdn.example.com/b.png); }',
+      '.c { content: "// not a comment"; }',
+      '/* // also not a comment */',
+      '.d { color: blue; } // real comment',
+    ].join('\n');
+    const blanked = blankPreprocessorLineComments(scss);
+    assert.equal(blanked.includes('https://example.com/a.png'), true);
+    assert.equal(blanked.includes('url(//cdn.example.com/b.png)'), true);
+    assert.equal(blanked.includes('"// not a comment"'), true);
+    assert.equal(blanked.includes('/* // also not a comment */'), true);
+    assert.equal(blanked.includes('// real comment'), false);
+    assert.equal(blanked.includes('.d { color: blue; }'), true);
+  });
+
+  await t.test('extractStyleBlocks blanks // comments in scss/less blocks, not plain css', () => {
+    const scssVue =
+      '<template><div/></template>\n<style lang="scss">\n// comment\n.box { color: red; }\n</style>';
+    const scssBlocks = extractStyleBlocks('src/App.vue', scssVue);
+    assert.equal(scssBlocks.length, 1);
+    assert.equal(scssBlocks[0]?.includes('// comment'), false);
+    assert.equal(scssBlocks[0]?.includes('.box { color: red; }'), true);
+    assert.equal(scssBlocks[0]?.length, scssVue.length);
+
+    const lessVue =
+      '<template><div/></template>\n<style lang="less">\n// comment\n.box { color: red; }\n</style>';
+    const lessBlocks = extractStyleBlocks('src/App.vue', lessVue);
+    assert.equal(lessBlocks.length, 1);
+    assert.equal(lessBlocks[0]?.includes('// comment'), false);
+    assert.equal(lessBlocks[0]?.includes('.box { color: red; }'), true);
+
+    const plainVue =
+      '<template><div/></template>\n<style>\n// comment\n.box { color: red; }\n</style>';
+    const plainBlocks = extractStyleBlocks('src/App.vue', plainVue);
+    assert.equal(plainBlocks.length, 1);
+    assert.equal(plainBlocks[0]?.includes('// comment'), true);
   });
 });
 

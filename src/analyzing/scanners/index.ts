@@ -42,6 +42,7 @@ import {
 import {
   extractScriptBlocks,
   extractStyleBlocks,
+  blankPreprocessorLineComments,
   isMarkupPath,
   prepareHtmlForDomScan,
 } from './sfc-extractor.ts';
@@ -366,10 +367,18 @@ export function scanFiles(
 
       const ext = extname(lowerPath);
 
-      if (ext === '.css') {
+      if (ext === '.css' || ext === '.scss') {
         if (cssRules.length > 0) {
+          // Standalone .scss files can also carry `//` line comments; blank
+          // them (offsets preserved) so cssomnom sees the rules that follow.
+          // rawFileText stays the original content, as for extracted blocks.
+          const cssContent =
+            ext === '.scss' ? blankPreprocessorLineComments(content) : content;
           findings.push(
-            ...materializeRuleMatches(ctx, scanCssRules(relPath, content, cssRules)),
+            ...materializeRuleMatches(
+              ctx,
+              scanCssRules(relPath, cssContent, cssRules, content),
+            ),
           );
         }
         continue;
