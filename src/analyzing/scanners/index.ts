@@ -40,6 +40,7 @@ import {
   matchesFastTokens,
 } from './js-scanner.ts';
 import {
+  blankLineComments,
   extractScriptBlocks,
   extractStyleBlocks,
   isMarkupPath,
@@ -366,10 +367,14 @@ export function scanFiles(
 
       const ext = extname(lowerPath);
 
-      if (ext === '.css') {
+      if (ext === '.css' || ext === '.scss') {
         if (cssRules.length > 0) {
+          // cssomnom parses standard CSS, so blank `//` line comments in
+          // standalone `.scss` files first (offsets preserved); otherwise the
+          // comment attaches to the next rule's selector and drops that rule.
+          const cssContent = ext === '.scss' ? blankLineComments(content) : content;
           findings.push(
-            ...materializeRuleMatches(ctx, scanCssRules(relPath, content, cssRules)),
+            ...materializeRuleMatches(ctx, scanCssRules(relPath, cssContent, cssRules)),
           );
         }
         continue;

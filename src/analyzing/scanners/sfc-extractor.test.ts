@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  blankLineComments,
   blankOutsideRange,
   blankRanges,
   extractScriptBlocks,
@@ -109,5 +110,63 @@ void test('sfc-extractor: Vue and Svelte script & style extraction', async (t) =
     assert.equal(litBlocks.length, 1);
     assert.equal(litBlocks[0]?.includes('.card { color:'), true);
     assert.equal(litBlocks[0]?.includes('${"red"}'), false);
+  });
+});
+
+void test('sfc-extractor: SCSS style blocks', async (t) => {
+  await t.test('blanks // line comments in <style lang="scss"> blocks preserving offsets', () => {
+    const vue = [
+      '<template><div/></template>',
+      '<style lang="scss">',
+      '// header comment',
+      '.box::-webkit-scrollbar-thumb { background: red; }',
+      '</style>',
+    ].join('\n');
+    const blocks = extractStyleBlocks('src/App.vue', vue);
+    assert.equal(blocks.length, 1);
+    const block = blocks[0] ?? '';
+    assert.equal(block.includes('// header comment'), false);
+    assert.equal(block.includes('.box::-webkit-scrollbar-thumb { background: red; }'), true);
+    // Offsets preserved: the rule stays on line 4.
+    assert.equal(block.split('\n')[3]?.includes('.box::-webkit-scrollbar-thumb'), true);
+  });
+
+  await t.test('leaves plain <style> blocks untouched', () => {
+    const vue = '<template><div/></template>\n<style>\n.btn { color: red; }\n</style>';
+    const blocks = extractStyleBlocks('src/App.vue', vue);
+    assert.equal(blocks.length, 1);
+    assert.equal(blocks[0]?.includes('.btn { color: red; }'), true);
+  });
+});
+
+void test('sfc-extractor: blankLineComments', async (t) => {
+  await t.test('blanks // comments and preserves newlines and offsets', () => {
+    const css = '.a { color: red; }\n// comment\n.b { color: blue; }\n';
+    const blanked = blankLineComments(css);
+    assert.equal(blanked.length, css.length);
+    assert.equal(blanked.split('\n').length, css.split('\n').length);
+    assert.equal(blanked.includes('// comment'), false);
+    assert.equal(blanked.includes('.a { color: red; }'), true);
+    assert.equal(blanked.includes('.b { color: blue; }'), true);
+    assert.equal(blanked.split('\n')[2], '.b { color: blue; }');
+  });
+
+  await t.test('skips // inside strings, block comments, and :// URLs', () => {
+    const css = [
+      '.a { content: "http://example.com//x"; }',
+      '.b { background: url(https://example.com/a.png); }',
+      '/* keep // this */ .c { color: red; }',
+      ".d { content: '// not a comment'; }",
+    ].join('\n');
+    const blanked = blankLineComments(css);
+    assert.equal(blanked, css);
+  });
+
+  await t.test('blanks a trailing // comment after a declaration', () => {
+    const css = '.a { color: red; } // trailing\n.b { color: blue; }\n';
+    const blanked = blankLineComments(css);
+    assert.equal(blanked.includes('// trailing'), false);
+    assert.equal(blanked.includes('.a { color: red; }'), true);
+    assert.equal(blanked.includes('.b { color: blue; }'), true);
   });
 });

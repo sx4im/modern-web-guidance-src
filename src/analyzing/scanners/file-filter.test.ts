@@ -9,6 +9,7 @@ import { SyntaxKind } from 'ts-morph';
 import type { AnalyzerRule } from '../schema.ts';
 import {
   BUILD_OR_INSTALL_DIR_SEGMENTS,
+  CSS_RULE_EXTENSIONS,
   DOCS_AND_TESTS_DIR_SEGMENTS,
   hasVendoredLicenseHeader,
   isBuildOrInstallPath,
@@ -107,6 +108,10 @@ describe('file-filter vendored and hashed asset exclusions', () => {
 
     assert.equal(isExcludedCorpusNonAppPath('src/styles/aspect-ratio.css'), false);
     assert.equal(shouldScanFile('src/styles/aspect-ratio.css'), true);
+
+    assert.equal(isExcludedCorpusNonAppPath('src/styles/main.scss'), false);
+    assert.equal(shouldScanFile('src/styles/main.scss'), true);
+    assert.ok((CSS_RULE_EXTENSIONS as readonly string[]).includes('.scss'));
   });
 
   it('excludes Coolite Datejs and 2-part versioned license headers (Card 004ac0a9d6f8)', () => {

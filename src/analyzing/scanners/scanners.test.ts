@@ -959,6 +959,57 @@ void test('scanFiles: per-file exception boundary', () => {
   assert.deepEqual(findings, []);
 });
 
+void test('scanFiles: SCSS coverage (legacy-scan drops nothing after // comments)', () => {
+  // Regression test for the issue's six-file fixture: a legacy rule must be
+  // found in standalone .scss files and in <style lang="scss"> blocks even
+  // when a // line comment sits above the rule.
+  const thumbRule: AnalyzerRule = {
+    id: 'test-css-scrollbar-thumb',
+    guideId: 'scrollbar-guide',
+    guideHash: '123456789012',
+    summary: 'Find scrollbar thumb styling',
+    verifierRubric: { keepWhen: ['background property'], dropWhen: [] },
+    matcher: {
+      kind: 'css',
+      fastTokens: ['::-webkit-scrollbar-thumb'],
+      matchRule: (styleRule) => {
+        if (styleRule.selectorText.includes('::-webkit-scrollbar-thumb')) {
+          return { message: 'found scrollbar thumb styling' };
+        }
+        return null;
+      },
+    },
+  };
+
+  const legacyRule = '.box::-webkit-scrollbar-thumb { background: red; }';
+  const files = new Map<string, string>([
+    ['case1.css', legacyRule],
+    ['case2.scss', legacyRule],
+    [
+      'case3_vue_clean.vue',
+      '<template><div/></template><style lang="scss">\n.box::-webkit-scrollbar-thumb { background: red; }\n</style>',
+    ],
+    [
+      'case4_vue_block_comment.vue',
+      '<template><div/></template><style lang="scss">\n/* comment */\n.box::-webkit-scrollbar-thumb { background: red; }\n</style>',
+    ],
+    [
+      'case5_vue_line_comment.vue',
+      '<template><div/></template><style lang="scss">\n// comment\n.box::-webkit-scrollbar-thumb { background: red; }\n</style>',
+    ],
+    ['case6_css_nested.css', '.box { &::-webkit-scrollbar-thumb { background: red; } }'],
+  ]);
+
+  const findings = scanFiles(files, [thumbRule], { repo: 'test', commit: 'test' });
+  assert.equal(findings.length, 6);
+  for (const name of files.keys()) {
+    const found = findings.find((f) => f.file === name);
+    assert.ok(found, `${name} must produce a finding`);
+  }
+  // Offsets preserved: the rule in the // comment case stays on line 3.
+  assert.equal(findings.find((f) => f.file === 'case5_vue_line_comment.vue')?.line, 3);
+});
+
 void test('ast-helpers: feature-guard AST blind spots and identifier resolution', async (t) => {
   await t.test('resolves cached boolean feature variables in early returns and if statements', () => {
     const code = `

@@ -264,6 +264,67 @@ export function isMarkupPath(relPath: string): boolean {
 }
 
 /**
+ * Blanks `//` single-line comments (SCSS-style) by replacing their characters
+ * with spaces, preserving newlines so line/column offsets are unchanged.
+ * Skips `//` inside strings, inside block comments, and after `:` (e.g. the
+ * `//` in `https://` URLs).
+ */
+export function blankLineComments(content: string): string {
+  const chars = content.split('');
+  const len = chars.length;
+  let i = 0;
+
+  while (i < len) {
+    const ch = chars[i];
+
+    // Quoted strings: leave their contents untouched.
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const quote = ch;
+      i++;
+      while (i < len) {
+        const c = chars[i];
+        if (c === '\\') {
+          i += 2;
+          continue;
+        }
+        if (c === quote) {
+          i++;
+          break;
+        }
+        // An unterminated string ends at the newline in CSS/SCSS.
+        if (c === '\n') break;
+        i++;
+      }
+      continue;
+    }
+
+    // Block comments: leave them untouched (a `//` inside one must not
+    // blank away the closing `*/` on the same line).
+    if (ch === '/' && chars[i + 1] === '*') {
+      i += 2;
+      while (i < len && !(chars[i] === '*' && chars[i + 1] === '/')) {
+        i++;
+      }
+      i += 2;
+      continue;
+    }
+
+    // A `//` line comment, unless it is the `//` of a `://` URL.
+    if (ch === '/' && chars[i + 1] === '/' && chars[i - 1] !== ':') {
+      while (i < len && chars[i] !== '\n' && chars[i] !== '\r') {
+        chars[i] = ' ';
+        i++;
+      }
+      continue;
+    }
+
+    i++;
+  }
+
+  return chars.join('');
+}
+
+/**
  * Extracts style blocks from HTML, Vue, Svelte, and Astro files,
  * or Lit css`...` tagged template literals from JS/TS files.
  */
@@ -274,12 +335,21 @@ export function extractStyleBlocks(relPath: string, content: string): readonly s
 
   const blocks: string[] = [];
   for (const match of content.matchAll(STYLE_TAG_REGEX)) {
+    const attrStr = match[1] ?? '';
     const body = match[2] ?? '';
     if (body.trim().length > 0 && match.index !== undefined) {
       const openTagLen = match[0].indexOf('>') + 1;
       const startOffset = match.index + openTagLen;
       const endOffset = startOffset + body.length;
-      blocks.push(blankOutsideRange(content, startOffset, endOffset));
+      const blanked = blankOutsideRange(content, startOffset, endOffset);
+      // cssomnom parses standard CSS, so a `//` line comment inside a
+      // `<style lang="scss">` block would attach to the next rule's selector
+      // and silently drop that rule. Blank the comments (offsets preserved)
+      // so the rules underneath stay scannable.
+      const attrs = parseTagAttributes(attrStr);
+      blocks.push(
+        attrs.lang?.toLowerCase() === 'scss' ? blankLineComments(blanked) : blanked,
+      );
     }
   }
 
