@@ -368,6 +368,127 @@ describe('ime-safe-enter-submit rule', () => {
     assert.equal(matches.length, 1);
   });
 
+  test('flags JSX onKeyDown logical-AND shorthand e.key === "Enter" && onSearch()', () => {
+    const code = `
+      export function ShorthandSearch({ onSearch }) {
+        return <input type="text" onKeyDown={(e) => e.key === 'Enter' && onSearch()} />;
+      }
+    `;
+    const { matches } = scanJsSource(
+      'components/ShorthandSearch.tsx',
+      code,
+      [imeSafeEnterSubmitMatcher]
+    );
+    assert.equal(matches.length, 1);
+    assert.match(matches[0].message, /isComposing|IME/);
+  });
+
+  test('flags JSX onKeyDown negated early return if (e.key !== "Enter" || busy) return;', () => {
+    const code = `
+      export function EarlyReturnSubmit({ onSubmit, busy }) {
+        return <input type="text" onKeyDown={(e) => { if (e.key !== 'Enter' || busy) return; onSubmit(); }} />;
+      }
+    `;
+    const { matches } = scanJsSource(
+      'components/EarlyReturnSubmit.tsx',
+      code,
+      [imeSafeEnterSubmitMatcher]
+    );
+    assert.equal(matches.length, 1);
+    assert.match(matches[0].message, /isComposing|IME/);
+  });
+
+  test('flags addEventListener logical-AND shorthand in a block body', () => {
+    const code = `
+      input.addEventListener('keydown', (e) => {
+        e.key === 'Enter' && onSearch();
+      });
+    `;
+    const { matches } = scanJsSource(
+      'search/shorthand.js',
+      code,
+      [imeSafeEnterSubmitMatcher]
+    );
+    assert.equal(matches.length, 1);
+    assert.match(matches[0].message, /isComposing|IME/);
+  });
+
+  test('flags negated early return with loose != and a bare guard', () => {
+    const code = `
+      input.addEventListener('keydown', (e) => {
+        if (e.key != 'Enter') return;
+        onSubmit();
+      });
+    `;
+    const { matches } = scanJsSource(
+      'forms/loose-guard.js',
+      code,
+      [imeSafeEnterSubmitMatcher]
+    );
+    assert.equal(matches.length, 1);
+    assert.match(matches[0].message, /isComposing|IME/);
+  });
+
+  test('ignores logical-AND shorthand guarded by isComposing', () => {
+    const code = `
+      export function SafeShorthandSearch({ onSearch }) {
+        return <input type="text" onKeyDown={(e) => e.key === 'Enter' && !e.isComposing && onSearch()} />;
+      }
+    `;
+    const { matches } = scanJsSource(
+      'components/SafeShorthandSearch.tsx',
+      code,
+      [imeSafeEnterSubmitMatcher]
+    );
+    assert.equal(matches.length, 0);
+  });
+
+  test('ignores logical-AND shorthand that only suppresses or evaluates a boolean', () => {
+    const code = `
+      input.addEventListener('keydown', (e) => {
+        e.key === 'Enter' && e.preventDefault();
+      });
+      input.addEventListener('keydown', (e) => {
+        e.key === 'Enter' && !e.shiftKey;
+      });
+    `;
+    const { matches } = scanJsSource(
+      'search/shorthand-suppress.js',
+      code,
+      [imeSafeEnterSubmitMatcher]
+    );
+    assert.equal(matches.length, 0);
+  });
+
+  test('ignores negated early-return guard that proceeds only with Ctrl+Enter', () => {
+    const code = `
+      input.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' || !e.ctrlKey) return;
+        onSubmit();
+      });
+    `;
+    const { matches } = scanJsSource(
+      'forms/ctrl-guard.js',
+      code,
+      [imeSafeEnterSubmitMatcher]
+    );
+    assert.equal(matches.length, 0);
+  });
+
+  test('ignores negated early-return guard with no following action', () => {
+    const code = `
+      input.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+      });
+    `;
+    const { matches } = scanJsSource(
+      'forms/guard-only.js',
+      code,
+      [imeSafeEnterSubmitMatcher]
+    );
+    assert.equal(matches.length, 0);
+  });
+
   test('ignores global document hotkeys, Alt+Enter shortcuts, Space+Enter button activation, and arrow-key widget navigation', () => {
     const code = `
       document.addEventListener('keydown', (event) => {

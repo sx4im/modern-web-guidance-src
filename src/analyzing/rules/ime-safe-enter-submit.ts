@@ -1,5 +1,12 @@
 /* oxlint-disable max-lines-per-function, max-depth */
-import { Node, SyntaxKind, type CallExpression, type JsxAttribute, type SourceFile } from 'ts-morph';
+import {
+  Node,
+  SyntaxKind,
+  type BinaryExpression,
+  type CallExpression,
+  type JsxAttribute,
+  type SourceFile,
+} from 'ts-morph';
 import type { AnalyzerMatch, AnalyzerRule, JsMatcherContext, JsRuleMatcher } from '../schema.ts';
 import { unwrapExpression } from '../scanners/ast-helpers.ts';
 
@@ -9,6 +16,11 @@ export const IME_SAFE_ENTER_SUBMIT_GUIDE_HASH = '99e3b42fb16a';
 // composition reports keyCode 229, so those handlers never fire mid-composition.
 const ENTER_CHECK_REGEX =
   /(?:key\s*===?\s*['"]Enter['"]|['"]Enter['"]\s*===?\s*key|code\s*===?\s*['"]Enter['"]|['"]Enter['"]\s*===?\s*code|case\s+['"]Enter['"])/;
+
+// A negated Enter comparison (`e.key !== 'Enter'`, `'Enter' != e.code`), as used
+// by early-return guards that only proceed once the Enter check has passed.
+const NEGATED_ENTER_CHECK_REGEX =
+  /(?:key|code)\s*!==?\s*['"]Enter['"]|['"]Enter['"]\s*!==?\s*(?:key|code)/;
 
 const SPACE_OR_BUTTON_KEY_REGEX =
   /\b(?:Space|Spacebar)\b|['"] ['"]|(?:keyCode|which)\s*===?\s*32\b|\b32\s*===?\s*(?:keyCode|which)/;
@@ -45,6 +57,72 @@ function isSuppressOnlyBranch(branchText: string): boolean {
     .replace(/case\s+['"]Enter['"]\s*:/g, '')
     .replace(/[{};,\s]/g, '');
   return stripped.length === 0;
+}
+
+/**
+ * Whether a branch does nothing but return (optionally with a value), as in an
+ * early-return guard: `if (e.key !== 'Enter') return;` or `{ return; }`.
+ */
+function isBareReturnBranch(node: Node): boolean {
+  if (Node.isReturnStatement(node)) {
+    return true;
+  }
+  if (Node.isBlock(node)) {
+    const statements = node.getStatements();
+    return (
+      statements.length > 0 && statements.every((stmt) => Node.isReturnStatement(stmt))
+    );
+  }
+  return false;
+}
+
+/**
+ * Whether a negated early-return guard only lets the handler proceed while a
+ * modifier key is held, i.e. a Ctrl/Cmd+Enter shortcut the rule drops per its
+ * dropWhen list: `if (e.key !== 'Enter' || !e.ctrlKey) return;` or
+ * `if (e.key !== 'Enter' || e.ctrlKey === false) return;`.
+ */
+function guardRequiresModifier(condText: string): boolean {
+  return (
+    /!\s*\(?\s*(?:[A-Za-z_$][\w$]*\.)?(?:ctrlKey|metaKey|altKey)\b/.test(condText) ||
+    /(?:ctrlKey|metaKey|altKey)\s*===?\s*false\b/.test(condText)
+  );
+}
+
+/**
+ * Whether an expression performs an action (a call, an assignment, or an
+ * increment/decrement) rather than merely evaluating to a value, so a
+ * logical-AND shorthand whose right side is only a boolean check
+ * (`e.key === 'Enter' && !e.shiftKey`) is not mistaken for an action.
+ */
+function hasActionSideEffect(node: Node): boolean {
+  const target = unwrapExpression(node);
+  if (Node.isCallExpression(target)) {
+    return true;
+  }
+  if (target.getDescendantsOfKind(SyntaxKind.CallExpression).length > 0) {
+    return true;
+  }
+  for (const binary of target.getDescendantsOfKind(SyntaxKind.BinaryExpression)) {
+    const kind = binary.getOperatorToken().getKind();
+    if (
+      kind === SyntaxKind.EqualsToken ||
+      kind === SyntaxKind.PlusEqualsToken ||
+      kind === SyntaxKind.MinusEqualsToken
+    ) {
+      return true;
+    }
+  }
+  for (const unary of [
+    ...target.getDescendantsOfKind(SyntaxKind.PrefixUnaryExpression),
+    ...target.getDescendantsOfKind(SyntaxKind.PostfixUnaryExpression),
+  ]) {
+    const kind = unary.getOperatorToken();
+    if (kind === SyntaxKind.PlusPlusToken || kind === SyntaxKind.MinusMinusToken) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -108,8 +186,9 @@ function checkHandlerForUnsafeEnter(handler: Node): AnalyzerMatch | null {
     return null;
   }
 
-  // Check if handler contains an Enter check
-  if (!ENTER_CHECK_REGEX.test(handlerText)) {
+  // Check if handler contains an Enter check (positive or negated, as in an
+  // early-return guard); a negated-only handler never matches ENTER_CHECK_REGEX.
+  if (!ENTER_CHECK_REGEX.test(handlerText) && !NEGATED_ENTER_CHECK_REGEX.test(handlerText)) {
     return null;
   }
 
@@ -133,6 +212,37 @@ function checkHandlerForUnsafeEnter(handler: Node): AnalyzerMatch | null {
             'Keydown Enter listener triggers submission/action without checking event.isComposing or event.keyCode === 229 for IME composition safety',
         };
       }
+    }
+
+    // Negated early-return guard: `if (e.key !== 'Enter' || busy) return; onSubmit();`
+    // The handler proceeds only once the Enter check has passed, so the action
+    // that follows the guard runs on Enter without IME gating.
+    if (NEGATED_ENTER_CHECK_REGEX.test(condText)) {
+      if (guardRequiresModifier(condText) || SPACE_OR_BUTTON_KEY_REGEX.test(condText)) {
+        continue;
+      }
+      if (!isBareReturnBranch(ifStmt.getThenStatement())) {
+        continue;
+      }
+      const parent = ifStmt.getParent();
+      if (!parent || !Node.isBlock(parent)) {
+        continue;
+      }
+      const statements = parent.getStatements();
+      const index = statements.findIndex((stmt) => stmt === ifStmt);
+      const rest = index === -1 ? [] : statements.slice(index + 1);
+      if (rest.length === 0) {
+        continue;
+      }
+      const restText = rest.map((stmt) => stmt.getText()).join('\n');
+      if (isSuppressOnlyBranch(restText) || SYNTHETIC_KEY_EVENT_REGEX.test(restText)) {
+        continue;
+      }
+      return {
+        line: ifStmt.getStartLineNumber(),
+        message:
+          'Keydown Enter listener triggers submission/action without checking event.isComposing or event.keyCode === 229 for IME composition safety',
+      };
     }
   }
 
@@ -161,6 +271,57 @@ function checkHandlerForUnsafeEnter(handler: Node): AnalyzerMatch | null {
         }
       }
     }
+  }
+
+  // Logical-AND shorthand: `e.key === 'Enter' && onSearch()` — the Enter check
+  // is the left operand of a top-level `&&` in the handler body, with the
+  // action on the right. Only top-level expressions count, so an `&&` nested
+  // inside an if condition or a call argument is left to the IfStatement check.
+  const handlerBody =
+    Node.isArrowFunction(handler) ||
+    Node.isFunctionExpression(handler) ||
+    Node.isFunctionDeclaration(handler)
+      ? handler.getBody()
+      : undefined;
+  const shorthandCandidates: BinaryExpression[] = [];
+  if (handlerBody) {
+    if (Node.isBinaryExpression(handlerBody)) {
+      shorthandCandidates.push(handlerBody);
+    } else if (Node.isBlock(handlerBody)) {
+      for (const stmt of handlerBody.getStatements()) {
+        if (Node.isExpressionStatement(stmt)) {
+          const expr = unwrapExpression(stmt.getExpression());
+          if (Node.isBinaryExpression(expr)) {
+            shorthandCandidates.push(expr);
+          }
+        }
+      }
+    }
+  }
+  for (const binary of shorthandCandidates) {
+    if (binary.getOperatorToken().getKind() !== SyntaxKind.AmpersandAmpersandToken) {
+      continue;
+    }
+    const leftText = unwrapExpression(binary.getLeft()).getText();
+    if (!ENTER_CHECK_REGEX.test(leftText)) {
+      continue;
+    }
+    if (requiresCtrlOrMetaModifier(leftText) || SPACE_OR_BUTTON_KEY_REGEX.test(leftText)) {
+      continue;
+    }
+    const right = unwrapExpression(binary.getRight());
+    if (
+      isSuppressOnlyBranch(right.getText()) ||
+      SYNTHETIC_KEY_EVENT_REGEX.test(right.getText()) ||
+      !hasActionSideEffect(right)
+    ) {
+      continue;
+    }
+    return {
+      line: binary.getStartLineNumber(),
+      message:
+        'Keydown Enter listener triggers submission/action without checking event.isComposing or event.keyCode === 229 for IME composition safety',
+    };
   }
 
   return null;
@@ -331,7 +492,11 @@ export const imeSafeEnterSubmitMatcher: JsRuleMatcher = {
     if (ctx.filePath && TEST_FILE_PATH_REGEX.test(ctx.filePath)) {
       return [];
     }
-    if (ctx.fileContent && !ENTER_CHECK_REGEX.test(ctx.fileContent)) {
+    if (
+      ctx.fileContent &&
+      !ENTER_CHECK_REGEX.test(ctx.fileContent) &&
+      !NEGATED_ENTER_CHECK_REGEX.test(ctx.fileContent)
+    ) {
       return [];
     }
 
