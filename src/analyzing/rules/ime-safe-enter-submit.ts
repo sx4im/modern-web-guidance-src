@@ -1,14 +1,16 @@
 /* oxlint-disable max-lines-per-function, max-depth */
 import { Node, SyntaxKind, type CallExpression, type JsxAttribute, type SourceFile } from 'ts-morph';
 import type { AnalyzerMatch, AnalyzerRule, JsMatcherContext, JsRuleMatcher } from '../schema.ts';
-import { unwrapExpression } from '../scanners/ast-helpers.ts';
+import { getSemanticParent, unwrapExpression } from '../scanners/ast-helpers.ts';
 
 export const IME_SAFE_ENTER_SUBMIT_GUIDE_HASH = '99e3b42fb16a';
 
 // keyCode/which === 13 checks are deliberately absent: the keydown that confirms an IME
 // composition reports keyCode 229, so those handlers never fire mid-composition.
 const ENTER_CHECK_REGEX =
-  /(?:key\s*===?\s*['"]Enter['"]|['"]Enter['"]\s*===?\s*key|code\s*===?\s*['"]Enter['"]|['"]Enter['"]\s*===?\s*code|case\s+['"]Enter['"])/;
+  // `(?:[\w$]+\.)*` allows the event receiver (`e.key`, `event.code`) between
+  // the operator and the property name in the reversed `'Enter' === e.key` form.
+  /(?:key\s*===?\s*['"]Enter['"]|['"]Enter['"]\s*===?\s*(?:[\w$]+\.)*key|code\s*===?\s*['"]Enter['"]|['"]Enter['"]\s*===?\s*(?:[\w$]+\.)*code|case\s+['"]Enter['"])/;
 
 const SPACE_OR_BUTTON_KEY_REGEX =
   /\b(?:Space|Spacebar)\b|['"] ['"]|(?:keyCode|which)\s*===?\s*32\b|\b32\s*===?\s*(?:keyCode|which)/;
@@ -87,6 +89,109 @@ function requiresCtrlOrMetaModifier(condText: string): boolean {
   return hasPositiveCtrl || hasPositiveMeta || hasPositiveAlt;
 }
 
+const NEGATED_ENTER_REGEX =
+  /(?:\bkey\b|\bcode\b)\s*!==?\s*['"]Enter['"]|['"]Enter['"]\s*!==?\s*(?:[\w$]+\.)*(?:\bkey\b|\bcode\b)|!\s*\(\s*(?:\bkey\b|\bcode\b)\s*===?\s*['"]Enter['"]|!\s*\(\s*['"]Enter['"]\s*===?\s*(?:[\w$]+\.)*(?:\bkey\b|\bcode\b)/;
+
+const ASSIGNMENT_OPERATORS = new Set([
+  SyntaxKind.EqualsToken,
+  SyntaxKind.PlusEqualsToken,
+  SyntaxKind.MinusEqualsToken,
+  SyntaxKind.AsteriskEqualsToken,
+  SyntaxKind.AsteriskAsteriskEqualsToken,
+  SyntaxKind.SlashEqualsToken,
+  SyntaxKind.PercentEqualsToken,
+  SyntaxKind.LessThanLessThanEqualsToken,
+  SyntaxKind.GreaterThanGreaterThanEqualsToken,
+  SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken,
+  SyntaxKind.AmpersandEqualsToken,
+  SyntaxKind.BarEqualsToken,
+  SyntaxKind.CaretEqualsToken,
+  SyntaxKind.AmpersandAmpersandEqualsToken,
+  SyntaxKind.BarBarEqualsToken,
+  SyntaxKind.QuestionQuestionEqualsToken,
+]);
+
+/**
+ * Whether a condition contains a negated Enter check as one of its top-level
+ * boolean terms: `e.key !== 'Enter'`, `'Enter' !== e.key`, or `!(e.key === 'Enter')`,
+ * possibly combined with `||` or `&&` (e.g. `e.key !== 'Enter' || busy`).
+ */
+function hasNegatedEnterTerm(cond: Node): boolean {
+  if (Node.isBinaryExpression(cond)) {
+    const op = cond.getOperatorToken().getKind();
+    if (op === SyntaxKind.BarBarToken || op === SyntaxKind.AmpersandAmpersandToken) {
+      return hasNegatedEnterTerm(cond.getLeft()) || hasNegatedEnterTerm(cond.getRight());
+    }
+  }
+  return NEGATED_ENTER_REGEX.test(cond.getText());
+}
+
+/**
+ * Whether an expression acts when evaluated: it calls something, assigns, or
+ * increments/decrements. A bare read (`!e.shiftKey`, a bare identifier) does not.
+ */
+function hasActionSideEffect(expr: Node): boolean {
+  if (Node.isCallExpression(unwrapExpression(expr))) {
+    return true;
+  }
+  if (expr.getDescendantsOfKind(SyntaxKind.CallExpression).length > 0) {
+    return true;
+  }
+  for (const binary of expr.getDescendantsOfKind(SyntaxKind.BinaryExpression)) {
+    if (ASSIGNMENT_OPERATORS.has(binary.getOperatorToken().getKind())) {
+      return true;
+    }
+  }
+  for (const unary of [
+    ...expr.getDescendantsOfKind(SyntaxKind.PrefixUnaryExpression),
+    ...expr.getDescendantsOfKind(SyntaxKind.PostfixUnaryExpression),
+  ]) {
+    const op = unary.getOperatorToken();
+    if (op === SyntaxKind.PlusPlusToken || op === SyntaxKind.MinusMinusToken) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The statements that run after `node` in program order within the handler:
+ * the siblings that follow it in its block, or, when it is the block's last
+ * statement, the statements after the enclosing statement, up to the handler.
+ * Null when nothing follows.
+ */
+function statementsAfter(node: Node): string | null {
+  let current: Node = node;
+  for (;;) {
+    const parent = current.getParent();
+    if (!parent) {
+      return null;
+    }
+    if (Node.isBlock(parent)) {
+      const stmts = parent.getStatements();
+      const idx = stmts.findIndex((s) => s === current);
+      if (idx >= 0 && idx + 1 < stmts.length) {
+        return stmts
+          .slice(idx + 1)
+          .map((s) => s.getText())
+          .join('\n');
+      }
+      current = parent;
+      continue;
+    }
+    if (
+      Node.isArrowFunction(parent) ||
+      Node.isFunctionExpression(parent) ||
+      Node.isFunctionDeclaration(parent) ||
+      Node.isMethodDeclaration(parent) ||
+      Node.isSourceFile(parent)
+    ) {
+      return null;
+    }
+    current = parent;
+  }
+}
+
 /**
  * Checks a handler function for an Enter key check lacking isComposing / keyCode 229 guards.
  */
@@ -109,7 +214,9 @@ function checkHandlerForUnsafeEnter(handler: Node): AnalyzerMatch | null {
   }
 
   // Check if handler contains an Enter check
-  if (!ENTER_CHECK_REGEX.test(handlerText)) {
+  // A negated Enter check (`e.key !== 'Enter'`) also counts: it is the guard
+  // of an early-return handler, checked by the loop below.
+  if (!ENTER_CHECK_REGEX.test(handlerText) && !NEGATED_ENTER_REGEX.test(handlerText)) {
     return null;
   }
 
@@ -134,6 +241,78 @@ function checkHandlerForUnsafeEnter(handler: Node): AnalyzerMatch | null {
         };
       }
     }
+  }
+
+  // Look for logical-AND shorthand: `e.key === 'Enter' && onSearch()` as the
+  // handler's body or an expression/return statement. The Enter check is the
+  // left operand and the right side calls or acts, with no `if` in between.
+  for (const andExpr of handler.getDescendantsOfKind(SyntaxKind.BinaryExpression)) {
+    if (andExpr.getOperatorToken().getKind() !== SyntaxKind.AmpersandAmpersandToken) {
+      continue;
+    }
+    // Only when the `&&` itself is what the handler runs for effect: its body,
+    // or an expression/return statement. Inside an `if` condition (or any other
+    // nested position) it is a guard, not the handler's action.
+    const { parent } = getSemanticParent(andExpr);
+    if (
+      !parent ||
+      (!Node.isArrowFunction(parent) &&
+        !Node.isFunctionExpression(parent) &&
+        !Node.isExpressionStatement(parent) &&
+        !Node.isReturnStatement(parent))
+    ) {
+      continue;
+    }
+    const leftText = andExpr.getLeft().getText();
+    if (!ENTER_CHECK_REGEX.test(leftText)) {
+      continue;
+    }
+    if (requiresCtrlOrMetaModifier(leftText) || SPACE_OR_BUTTON_KEY_REGEX.test(leftText)) {
+      continue;
+    }
+    const right = andExpr.getRight();
+    const rightText = right.getText();
+    if (isSuppressOnlyBranch(rightText) || SYNTHETIC_KEY_EVENT_REGEX.test(rightText)) {
+      continue;
+    }
+    if (!hasActionSideEffect(right)) {
+      continue;
+    }
+    return {
+      line: andExpr.getStartLineNumber(),
+      message:
+        'Keydown Enter listener triggers submission/action without checking event.isComposing or event.keyCode === 229 for IME composition safety',
+    };
+  }
+
+  // Look for negated early returns: `if (e.key !== 'Enter' || busy) return;`
+  // with the action after the guard. The handler only reaches the action when
+  // Enter was pressed (and the other guards are clear), exactly like the `if`
+  // form above, but no IfStatement checks Enter positively.
+  for (const ifStmt of handler.getDescendantsOfKind(SyntaxKind.IfStatement)) {
+    const condText = ifStmt.getExpression().getText();
+    if (!hasNegatedEnterTerm(ifStmt.getExpression())) {
+      continue;
+    }
+    if (requiresCtrlOrMetaModifier(condText) || SPACE_OR_BUTTON_KEY_REGEX.test(condText)) {
+      continue;
+    }
+    const thenStmt = ifStmt.getThenStatement();
+    const thenText = thenStmt.getText();
+    // The branch must only return (possibly after suppression): anything else
+    // in the branch means the action lives there, not after the guard.
+    if (!/\breturn\b/.test(thenText) || !isSuppressOnlyBranch(thenText)) {
+      continue;
+    }
+    const after = statementsAfter(ifStmt);
+    if (!after || isSuppressOnlyBranch(after) || SYNTHETIC_KEY_EVENT_REGEX.test(after)) {
+      continue;
+    }
+    return {
+      line: ifStmt.getStartLineNumber(),
+      message:
+        'Keydown Enter listener triggers submission/action without checking event.isComposing or event.keyCode === 229 for IME composition safety',
+    };
   }
 
   // Look for SwitchStatements on event.key with an 'Enter' case
@@ -331,7 +510,13 @@ export const imeSafeEnterSubmitMatcher: JsRuleMatcher = {
     if (ctx.filePath && TEST_FILE_PATH_REGEX.test(ctx.filePath)) {
       return [];
     }
-    if (ctx.fileContent && !ENTER_CHECK_REGEX.test(ctx.fileContent)) {
+    // A negated Enter check (`e.key !== 'Enter'`) also counts: it is the guard
+    // of an early-return handler, checked inside checkHandlerForUnsafeEnter.
+    if (
+      ctx.fileContent &&
+      !ENTER_CHECK_REGEX.test(ctx.fileContent) &&
+      !NEGATED_ENTER_REGEX.test(ctx.fileContent)
+    ) {
       return [];
     }
 
@@ -386,6 +571,7 @@ export const imeSafeEnterSubmitRule: AnalyzerRule = {
   verifierRubric: {
     keepWhen: [
       'Keydown event listeners on inputs or textareas checking event.key === "Enter" or event.code === "Enter" to trigger submission, search, or message sending without checking event.isComposing or event.keyCode === 229.',
+      'Keydown handlers using logical-AND shorthand (e.key === "Enter" && action()) or negated early returns (if (e.key !== "Enter") return; action()) to trigger submission without checking event.isComposing or event.keyCode === 229.',
       'Custom enter-to-submit implementations intercepting Enter to call form.submit(), form.requestSubmit(), or trigger a click on a submit button without IME composition gating.',
     ],
     dropWhen: [
