@@ -242,14 +242,15 @@ async function main() {
     const repoSource = distTag === "next"
       ? "https://github.com/GoogleChrome/modern-web-guidance/tree/next"
       : "GoogleChrome/modern-web-guidance";
-    const installArgs = `-y skills add ${repoSource} ${values.choose ? "" : "--skill modern-web-guidance"}`
+    const { command: skillsRunner, args: skillsRunnerArgs } = getSkillsRunner();
+    const installArgs = `skills add ${repoSource} ${values.choose ? "" : "--skill modern-web-guidance"}`
       .split(" ")
       .filter(Boolean)
       .concat(extraArgs);
 
     const detectedAgent = determineAgent().agent?.name;
     const env = detectedAgent ? { ...process.env, AI_AGENT: detectedAgent } : process.env;
-    const result = spawnSync("npx", installArgs, {
+    const result = spawnSync(skillsRunner, [...skillsRunnerArgs, ...installArgs], {
       stdio: "inherit",
       shell: process.platform === "win32",
       env,
@@ -266,8 +267,9 @@ async function main() {
     process.exit(result.status ?? 0);
   } else if (command === "update") {
     const startTime = Date.now();
+    const { command: skillsRunner, args: skillsRunnerArgs } = getSkillsRunner();
     const skills = getOurCLIAdjacentSkillIDs();
-    const result = spawnSync("npx", ["-y", "skills", "update", ...skills], {
+    const result = spawnSync(skillsRunner, [...skillsRunnerArgs, "skills", "update", ...skills], {
       stdio: "inherit",
       shell: process.platform === "win32",
     });
@@ -295,8 +297,9 @@ async function main() {
     process.exit(code);
   } else if (command === "uninstall") {
     const startTime = Date.now();
+    const { command: skillsRunner, args: skillsRunnerArgs } = getSkillsRunner();
     const skills = getOurCLIAdjacentSkillIDs();
-    const result = spawnSync("npx", ["-y", "skills", "remove", ...skills], {
+    const result = spawnSync(skillsRunner, [...skillsRunnerArgs, "skills", "remove", ...skills], {
       stdio: "inherit",
       shell: process.platform === "win32",
     });
@@ -322,6 +325,23 @@ function getCLISkillVersion(): string | null {
   } catch (e) {
     return null;
   }
+}
+
+// The `skills` CLI is run through the package-manager runner that launched this
+// CLI. npm, pnpm and yarn all set npm_config_user_agent (e.g. "pnpm/11.25.0
+// npm/? node/v24.21.0 linux x64"), so use the matching runner instead of
+// hardcoding `npx`: spawning `npx` re-runs npm's devEngines check against the
+// caller's package.json, which fails with EBADDEVENGINES in pnpm/yarn repos
+// that declare devEngines.packageManager (see #3617). Yarn 1 has no `dlx`
+// command, so it keeps using npx.
+function getSkillsRunner(): { command: string; args: string[] } {
+  const userAgent = process.env.npm_config_user_agent ?? "";
+  const [manager, version = ""] = userAgent.split("/");
+  if (manager === "pnpm") return { command: "pnpm", args: ["dlx"] };
+  if (manager === "yarn" && Number(version.split(".")[0]) >= 2) {
+    return { command: "yarn", args: ["dlx"] };
+  }
+  return { command: "npx", args: ["-y"] };
 }
 
 function getOurCLIAdjacentSkillIDs(): string[] {

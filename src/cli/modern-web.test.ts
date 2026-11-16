@@ -296,6 +296,9 @@ describe('modern-web CLI', () => {
         env: {
           ...process.env,
           PATH: `${tempBinDir}:${process.env.PATH}`,
+          // Pin the runner: without this, `pnpm test` in CI would make the
+          // CLI pick `pnpm dlx` instead of the npx shim below.
+          npm_config_user_agent: 'npm/12.0.2 node/v24.21.0 linux x64',
           NO_COLOR: '1',
           DISABLE_TELEMETRY: '1',
         },
@@ -305,6 +308,109 @@ describe('modern-web CLI', () => {
       assert.ok(fs.existsSync(logFile), 'Dummy npx should have recorded arguments');
       const args = JSON.parse(fs.readFileSync(logFile, 'utf8'));
       assert.deepStrictEqual(args.slice(0, 3), ['-y', 'skills', 'remove']);
+    } finally {
+      fs.rmSync(tempBinDir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses pnpm dlx to update skills when launched via pnpm', () => {
+    const tempBinDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mwg-pnpm-test-'));
+    const pnpmLogFile = path.join(tempBinDir, 'pnpm-args.json');
+    const npxLogFile = path.join(tempBinDir, 'npx-args.json');
+    const writeShim = (name: string, logFile: string) => {
+      fs.writeFileSync(
+        path.join(tempBinDir, name),
+        `#!/bin/sh\nnode -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify(process.argv.slice(2)))' "${logFile}" "$@"\n`,
+        { mode: 0o755 }
+      );
+    };
+    writeShim('pnpm', pnpmLogFile);
+    writeShim('npx', npxLogFile);
+
+    try {
+      const result = spawnSync('node', [scriptPath, 'update'], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${tempBinDir}:${process.env.PATH}`,
+          npm_config_user_agent: 'pnpm/11.25.0 npm/? node/v24.21.0 linux x64',
+          NO_COLOR: '1',
+          DISABLE_TELEMETRY: '1',
+        },
+      });
+
+      assert.strictEqual(result.status, 0);
+      assert.ok(fs.existsSync(pnpmLogFile), 'Dummy pnpm should have recorded arguments');
+      const args = JSON.parse(fs.readFileSync(pnpmLogFile, 'utf8'));
+      assert.deepStrictEqual(args.slice(0, 3), ['dlx', 'skills', 'update']);
+      assert.ok(!fs.existsSync(npxLogFile), 'npx must not be invoked when launched via pnpm');
+    } finally {
+      fs.rmSync(tempBinDir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses yarn dlx to update skills when launched via yarn 2+', () => {
+    const tempBinDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mwg-yarn-test-'));
+    const yarnLogFile = path.join(tempBinDir, 'yarn-args.json');
+    const npxLogFile = path.join(tempBinDir, 'npx-args.json');
+    const writeShim = (name: string, logFile: string) => {
+      fs.writeFileSync(
+        path.join(tempBinDir, name),
+        `#!/bin/sh\nnode -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify(process.argv.slice(2)))' "${logFile}" "$@"\n`,
+        { mode: 0o755 }
+      );
+    };
+    writeShim('yarn', yarnLogFile);
+    writeShim('npx', npxLogFile);
+
+    try {
+      const result = spawnSync('node', [scriptPath, 'update'], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${tempBinDir}:${process.env.PATH}`,
+          npm_config_user_agent: 'yarn/4.0.0 npm/? node/v24.21.0 linux x64',
+          NO_COLOR: '1',
+          DISABLE_TELEMETRY: '1',
+        },
+      });
+
+      assert.strictEqual(result.status, 0);
+      assert.ok(fs.existsSync(yarnLogFile), 'Dummy yarn should have recorded arguments');
+      const args = JSON.parse(fs.readFileSync(yarnLogFile, 'utf8'));
+      assert.deepStrictEqual(args.slice(0, 3), ['dlx', 'skills', 'update']);
+      assert.ok(!fs.existsSync(npxLogFile), 'npx must not be invoked when launched via yarn');
+    } finally {
+      fs.rmSync(tempBinDir, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to npx when launched via yarn 1 (no dlx command)', () => {
+    const tempBinDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mwg-yarn1-test-'));
+    const logFile = path.join(tempBinDir, 'npx-args.json');
+    const npxShim = path.join(tempBinDir, 'npx');
+    fs.writeFileSync(
+      npxShim,
+      `#!/bin/sh\nnode -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify(process.argv.slice(2)))' "${logFile}" "$@"\n`,
+      { mode: 0o755 }
+    );
+
+    try {
+      const result = spawnSync('node', [scriptPath, 'update'], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${tempBinDir}:${process.env.PATH}`,
+          npm_config_user_agent: 'yarn/1.22.22 npm/? node/v24.21.0 linux x64',
+          NO_COLOR: '1',
+          DISABLE_TELEMETRY: '1',
+        },
+      });
+
+      assert.strictEqual(result.status, 0);
+      assert.ok(fs.existsSync(logFile), 'Dummy npx should have recorded arguments');
+      const args = JSON.parse(fs.readFileSync(logFile, 'utf8'));
+      assert.deepStrictEqual(args.slice(0, 3), ['-y', 'skills', 'update']);
     } finally {
       fs.rmSync(tempBinDir, { recursive: true, force: true });
     }
