@@ -19,6 +19,7 @@ import { getVersion } from "./version.ts";
 import { getSkillUpdateLevel, isFrozenClaudeMarketplaceVersion } from "./skill-version.ts";
 import { USE_CASES } from "../rag/guides.ts";
 import { determineAgent, KNOWN_AGENTS } from "./telemetry/detect-agent.ts";
+import { detectPackageManager, getSkillsRunner } from "./package-manager.ts";
 
 declare const __MWG_DIST_TAG__: string | undefined;
 
@@ -242,18 +243,16 @@ async function main() {
     const repoSource = distTag === "next"
       ? "https://github.com/GoogleChrome/modern-web-guidance/tree/next"
       : "GoogleChrome/modern-web-guidance";
-    const installArgs = `-y skills add ${repoSource} ${values.choose ? "" : "--skill modern-web-guidance"}`
-      .split(" ")
-      .filter(Boolean)
-      .concat(extraArgs);
+    const skillsArgs = [
+      "add",
+      repoSource,
+      ...(values.choose ? [] : ["--skill", "modern-web-guidance"]),
+      ...extraArgs,
+    ];
 
     const detectedAgent = determineAgent().agent?.name;
     const env = detectedAgent ? { ...process.env, AI_AGENT: detectedAgent } : process.env;
-    const result = spawnSync("npx", installArgs, {
-      stdio: "inherit",
-      shell: process.platform === "win32",
-      env,
-    });
+    const result = spawnSkills(skillsArgs, env);
 
     const success = !result.error && result.status === 0;
     const commandType = values.choose ? CommandType.INSTALL_CHOOSE : CommandType.INSTALL;
@@ -267,10 +266,7 @@ async function main() {
   } else if (command === "update") {
     const startTime = Date.now();
     const skills = getOurCLIAdjacentSkillIDs();
-    const result = spawnSync("npx", ["-y", "skills", "update", ...skills], {
-      stdio: "inherit",
-      shell: process.platform === "win32",
-    });
+    const result = spawnSkills(["update", ...skills]);
     const success = !result.error && result.status === 0;
     await getLogger().logToolCommand(Date.now() - startTime, success, CommandType.UPDATE);
     if (result.error) {
@@ -296,10 +292,7 @@ async function main() {
   } else if (command === "uninstall") {
     const startTime = Date.now();
     const skills = getOurCLIAdjacentSkillIDs();
-    const result = spawnSync("npx", ["-y", "skills", "remove", ...skills], {
-      stdio: "inherit",
-      shell: process.platform === "win32",
-    });
+    const result = spawnSkills(["remove", ...skills]);
     const success = !result.error && result.status === 0;
     await getLogger().logToolCommand(Date.now() - startTime, success, CommandType.UNINSTALL);
     if (result.error) {
@@ -322,6 +315,20 @@ function getCLISkillVersion(): string | null {
   } catch (e) {
     return null;
   }
+}
+
+/**
+ * Runs the `skills` CLI under the package manager that owns the current
+ * working directory, so `update`/`install`/`uninstall` do not fail with
+ * EBADDEVENGINES in pnpm/yarn `devEngines` repos (issue #3617).
+ */
+function spawnSkills(skillsArgs: string[], env?: NodeJS.ProcessEnv) {
+  const runner = getSkillsRunner(detectPackageManager(), skillsArgs);
+  return spawnSync(runner.command, runner.args, {
+    stdio: "inherit",
+    shell: process.platform === "win32",
+    ...(env ? { env } : {}),
+  });
 }
 
 function getOurCLIAdjacentSkillIDs(): string[] {

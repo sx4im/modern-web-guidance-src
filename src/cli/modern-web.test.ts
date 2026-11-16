@@ -282,6 +282,10 @@ describe('modern-web CLI', () => {
 
   it('passes -y to npx when uninstalling skills', () => {
     const tempBinDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mwg-npx-test-'));
+    // Run in a temp npm repo: the CLI detects the package manager from the
+    // working directory, and the suite's own checkout declares pnpm.
+    const tempCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'mwg-npx-cwd-'));
+    fs.writeFileSync(path.join(tempCwd, 'package-lock.json'), '{"lockfileVersion": 3}');
     const logFile = path.join(tempBinDir, 'npx-args.json');
     const npxShim = path.join(tempBinDir, 'npx');
     fs.writeFileSync(
@@ -293,6 +297,7 @@ describe('modern-web CLI', () => {
     try {
       const result = spawnSync('node', [scriptPath, 'uninstall'], {
         encoding: 'utf8',
+        cwd: tempCwd,
         env: {
           ...process.env,
           PATH: `${tempBinDir}:${process.env.PATH}`,
@@ -307,6 +312,94 @@ describe('modern-web CLI', () => {
       assert.deepStrictEqual(args.slice(0, 3), ['-y', 'skills', 'remove']);
     } finally {
       fs.rmSync(tempBinDir, { recursive: true, force: true });
+      fs.rmSync(tempCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('spawns pnpm dlx (not npx) when updating inside a pnpm devEngines repo', () => {
+    const tempBinDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mwg-pnpm-test-'));
+    const tempCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'mwg-pnpm-cwd-'));
+    const pnpmLog = path.join(tempBinDir, 'pnpm-args.json');
+    const npxLog = path.join(tempBinDir, 'npx-args.json');
+    const writeShim = (name: string, logFile: string) => {
+      fs.writeFileSync(
+        path.join(tempBinDir, name),
+        `#!/bin/sh\nnode -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify(process.argv.slice(2)))' "${logFile}" "$@"\n`,
+        { mode: 0o755 }
+      );
+    };
+    writeShim('pnpm', pnpmLog);
+    writeShim('npx', npxLog);
+    fs.writeFileSync(
+      path.join(tempCwd, 'package.json'),
+      JSON.stringify({
+        name: 'test-repo',
+        devEngines: { packageManager: { name: 'pnpm', version: '^11.17.0', onFail: 'download' } },
+      }),
+    );
+
+    try {
+      const result = spawnSync('node', [scriptPath, 'update'], {
+        encoding: 'utf8',
+        cwd: tempCwd,
+        env: {
+          ...process.env,
+          PATH: `${tempBinDir}:${process.env.PATH}`,
+          NO_COLOR: '1',
+          DISABLE_TELEMETRY: '1',
+          // Reproduces #3617: invoked via npx inside a pnpm-enforced repo.
+          npm_config_user_agent: 'npm/12.0.2 node/v24.21.0',
+        },
+      });
+
+      assert.strictEqual(result.status, 0);
+      assert.ok(fs.existsSync(pnpmLog), 'pnpm shim should have been invoked');
+      assert.strictEqual(fs.existsSync(npxLog), false, 'npx must not be spawned in a pnpm repo');
+      const args = JSON.parse(fs.readFileSync(pnpmLog, 'utf8'));
+      assert.deepStrictEqual(args.slice(0, 3), ['dlx', 'skills', 'update']);
+    } finally {
+      fs.rmSync(tempBinDir, { recursive: true, force: true });
+      fs.rmSync(tempCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps spawning npx -y when updating in a plain npm repo', () => {
+    const tempBinDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mwg-npm-test-'));
+    const tempCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'mwg-npm-cwd-'));
+    const pnpmLog = path.join(tempBinDir, 'pnpm-args.json');
+    const npxLog = path.join(tempBinDir, 'npx-args.json');
+    const writeShim = (name: string, logFile: string) => {
+      fs.writeFileSync(
+        path.join(tempBinDir, name),
+        `#!/bin/sh\nnode -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify(process.argv.slice(2)))' "${logFile}" "$@"\n`,
+        { mode: 0o755 }
+      );
+    };
+    writeShim('pnpm', pnpmLog);
+    writeShim('npx', npxLog);
+    fs.writeFileSync(path.join(tempCwd, 'package-lock.json'), '{"lockfileVersion": 3}');
+
+    try {
+      const result = spawnSync('node', [scriptPath, 'update'], {
+        encoding: 'utf8',
+        cwd: tempCwd,
+        env: {
+          ...process.env,
+          PATH: `${tempBinDir}:${process.env.PATH}`,
+          NO_COLOR: '1',
+          DISABLE_TELEMETRY: '1',
+          npm_config_user_agent: 'npm/12.0.2 node/v24.21.0',
+        },
+      });
+
+      assert.strictEqual(result.status, 0);
+      assert.ok(fs.existsSync(npxLog), 'npx shim should have been invoked');
+      assert.strictEqual(fs.existsSync(pnpmLog), false, 'pnpm must not be spawned in an npm repo');
+      const args = JSON.parse(fs.readFileSync(npxLog, 'utf8'));
+      assert.deepStrictEqual(args.slice(0, 3), ['-y', 'skills', 'update']);
+    } finally {
+      fs.rmSync(tempBinDir, { recursive: true, force: true });
+      fs.rmSync(tempCwd, { recursive: true, force: true });
     }
   });
 });
